@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 import PyPDF2
+import requests
 from build_graph import (
     load_graph, get_neighbors,
     find_path, get_most_connected,
@@ -135,7 +136,7 @@ def hybrid_answer(query, model, index, chunks, G):
         for i, r in enumerate(vector_results)
     )
 
-    prompt = f"""You are a helpful assistant with access to 
+    prompt = f"""You are a helpful assistant with access to
 text passages and a knowledge graph.
 
 Use BOTH to give a comprehensive answer.
@@ -164,6 +165,83 @@ Answer:"""
     )
 
 
+# ---- Load components with auto-build ----
+
+@st.cache_resource
+def load_components():
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # ---- Auto-build graph if not present ----
+    if not Path("triples.pkl").exists():
+        st.info(
+            "🔄 First run — building knowledge graph from PDF..."
+        )
+
+        # Download PDF if not present
+        if not Path("document.pdf").exists():
+            with st.spinner("Downloading PDF..."):
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = requests.get(
+                    "https://en.wikipedia.org/api/rest_v1/"
+                    "page/pdf/Culture_of_Japan",
+                    headers=headers
+                )
+                open("document.pdf", "wb").write(r.content)
+                st.success("✅ PDF downloaded")
+
+        # Extract triples
+        with st.spinner(
+            "Extracting knowledge graph triples "
+            "(takes ~40 seconds)..."
+        ):
+            from extract_graph import (
+                extract_all_triples, save_triples
+            )
+            triples = extract_all_triples(
+                "document.pdf", max_chunks=20
+            )
+            save_triples(triples)
+            st.success(f"✅ Extracted {len(triples)} triples")
+
+    if not Path("knowledge_graph.pkl").exists():
+        with st.spinner("Building knowledge graph..."):
+            from extract_graph import load_triples
+            from build_graph import build_graph, save_graph
+            triples = load_triples()
+            G = build_graph(triples)
+            save_graph(G)
+            st.success(
+                f"✅ Graph built: "
+                f"{G.number_of_nodes()} nodes, "
+                f"{G.number_of_edges()} edges"
+            )
+
+    if not Path("graph.html").exists():
+        with st.spinner("Generating visualization..."):
+            G_temp = load_graph()
+            visualize_graph(G_temp, "graph.html", max_nodes=40)
+            st.success("✅ Visualization ready")
+
+    # ---- Load everything ----
+    G = load_graph()
+
+    if not Path("document.pdf").exists():
+        with st.spinner("Downloading PDF..."):
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(
+                "https://en.wikipedia.org/api/rest_v1/"
+                "page/pdf/Culture_of_Japan",
+                headers=headers
+            )
+            open("document.pdf", "wb").write(r.content)
+
+    text = extract_text_from_pdf("document.pdf")
+    chunks = split_into_chunks(text)
+    index = build_vector_index(chunks, model)
+
+    return model, G, chunks, index
+
+
 # ---- Streamlit UI ----
 
 st.set_page_config(
@@ -174,17 +252,6 @@ st.set_page_config(
 
 st.title("🕸️ GraphRAG — Knowledge Graph + Vector Search")
 st.caption("Project 4 — Relationship-aware retrieval")
-
-
-@st.cache_resource
-def load_components():
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    G = load_graph()
-    text = extract_text_from_pdf("document.pdf")
-    chunks = split_into_chunks(text)
-    index = build_vector_index(chunks, model)
-    return model, G, chunks, index
-
 
 model, G, chunks, index = load_components()
 
@@ -208,15 +275,20 @@ with tab1:
             st.write(msg["content"])
             if msg["role"] == "assistant":
                 if msg.get("graph_context"):
-                    with st.expander("🕸️ Graph relationships used"):
+                    with st.expander(
+                        "🕸️ Graph relationships used"
+                    ):
                         st.code(msg["graph_context"])
                 if msg.get("vector_results"):
                     with st.expander("📄 Text chunks used"):
                         for r in msg["vector_results"]:
                             st.caption(
-                                f"Similarity: {r['similarity']:.4f}"
+                                f"Similarity: "
+                                f"{r['similarity']:.4f}"
                             )
-                            st.caption(r["text"][:200] + "...")
+                            st.caption(
+                                r["text"][:200] + "..."
+                            )
                             st.divider()
 
     query = st.chat_input(
@@ -236,7 +308,9 @@ with tab1:
                 "Searching vectors + traversing graph..."
             ):
                 answer, v_results, g_context, entities = \
-                    hybrid_answer(query, model, index, chunks, G)
+                    hybrid_answer(
+                        query, model, index, chunks, G
+                    )
 
             st.write(answer)
 
@@ -246,11 +320,14 @@ with tab1:
             with col2:
                 st.metric(
                     "Graph relationships",
-                    len(g_context.split("\n")) if g_context else 0
+                    len(g_context.split("\n"))
+                    if g_context else 0
                 )
 
             if g_context:
-                with st.expander("🕸️ Graph relationships used"):
+                with st.expander(
+                    "🕸️ Graph relationships used"
+                ):
                     st.code(g_context)
 
             with st.expander("📄 Text chunks used"):
@@ -279,25 +356,29 @@ with tab2:
 
     col1, col2 = st.columns([1, 3])
     with col1:
-        max_nodes = st.slider("Max nodes to show", 20, 80, 40)
+        max_nodes = st.slider(
+            "Max nodes to show", 20, 80, 40
+        )
         if st.button("🔄 Regenerate Graph"):
             visualize_graph(G, "graph.html", max_nodes)
             st.rerun()
 
-    # Generate if not exists
-    if not Path("graph.html").exists():
-        visualize_graph(G, "graph.html", max_nodes)
-
-    with open("graph.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-
-    components.html(html_content, height=600, scrolling=True)
-
-    # Most connected entities
-    with col1:
         st.subheader("🏆 Most Connected")
         for node, degree in get_most_connected(G, top_n=10):
             st.markdown(f"**{node}** — {degree}")
+
+    with col2:
+        if not Path("graph.html").exists():
+            visualize_graph(G, "graph.html", max_nodes)
+
+        with open(
+            "graph.html", "r", encoding="utf-8"
+        ) as f:
+            html_content = f.read()
+
+        components.html(
+            html_content, height=600, scrolling=True
+        )
 
 
 # ---- Tab 3: Entity Explorer ----
@@ -309,7 +390,9 @@ with tab3:
         "Select an entity:", all_entities
     )
 
-    depth = st.radio("Search depth:", [1, 2], horizontal=True)
+    depth = st.radio(
+        "Search depth:", [1, 2], horizontal=True
+    )
 
     if selected:
         results, _ = get_neighbors(G, selected, depth=depth)
@@ -328,7 +411,9 @@ with tab3:
                 with col3:
                     st.success(o)
         else:
-            st.warning(f"No relationships found for '{selected}'")
+            st.warning(
+                f"No relationships found for '{selected}'"
+            )
 
         # Path finder
         st.divider()
@@ -349,4 +434,6 @@ with tab3:
                         f"**{s}** ──[{r}]──▶ **{o}**"
                     )
             else:
-                st.warning("No path found between these entities")
+                st.warning(
+                    "No path found between these entities"
+                )
