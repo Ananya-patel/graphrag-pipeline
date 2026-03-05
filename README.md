@@ -149,6 +149,5 @@ project4/
 | Project 5 | Multi-Doc RAG with LangChain | 🔄 Next |
 
 ---
-
-*Vector search finds facts. Graphs find connections. 
-Together they find understanding.*
+LIVE LINK :
+https://graphrag-pipeline.streamlit.app/
